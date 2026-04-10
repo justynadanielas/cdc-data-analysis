@@ -21,11 +21,13 @@ Generate sample data, filter rows, convert types, and aggregate results.
 
 from __future__ import annotations
 
-import pandas as pd
 import pendulum
 
 from airflow.providers.standard.operators.python import PythonOperator
 from airflow.sdk import DAG
+from pyspark.sql import SparkSession
+from pyspark.sql import functions as F
+from pyspark.sql.types import BooleanType, IntegerType, StringType, StructField, StructType
 
 with DAG(
     dag_id="silver_data_pipeline",
@@ -38,6 +40,9 @@ with DAG(
 ) as dag:
     dag.doc_md = __doc__
 
+    def get_spark_session(app_name: str) -> SparkSession:
+        return SparkSession.builder.appName(app_name).getOrCreate()
+
     def generate_data(**kwargs):
         rows = [
             {
@@ -48,30 +53,65 @@ with DAG(
             }
             for i in range(1, 11)
         ]
-        df = pd.DataFrame(rows)
-        kwargs["ti"].xcom_push(key="raw_data", value=df.to_dict(orient="records"))
-        print("Generated data:\n", df)
+
+        schema = StructType(
+            [
+                StructField("id", IntegerType(), nullable=False),
+                StructField("category", StringType(), nullable=False),
+                StructField("value", StringType(), nullable=False),
+                StructField("active", StringType(), nullable=False),
+            ]
+        )
+
+        spark = get_spark_session("silver_data_pipeline_generate")
+        df = spark.createDataFrame(rows, schema=schema)
+        kwargs["ti"].xcom_push(key="raw_data", value=[row.asDict() for row in df.collect()])
+        df.show(truncate=False)
 
     def transform_data(**kwargs):
         ti = kwargs["ti"]
         raw_data = ti.xcom_pull(task_ids="generate_data", key="raw_data")
-        df = pd.DataFrame(raw_data)
 
-        filtered = df[(df["category"].isin(["A", "B"])) & (df["active"] == "true")].copy()
-        filtered["value"] = filtered["value"].astype(int)
-        filtered["active"] = filtered["active"].map({"true": True, "false": False})
+        schema = StructType(
+            [
+                StructField("id", IntegerType(), nullable=False),
+                StructField("category", StringType(), nullable=False),
+                StructField("value", StringType(), nullable=False),
+                StructField("active", StringType(), nullable=False),
+            ]
+        )
 
-        ti.xcom_push(key="filtered_data", value=filtered.to_dict(orient="records"))
-        print("Filtered and converted data:\n", filtered)
+        spark = get_spark_session("silver_data_pipeline_transform")
+        df = spark.createDataFrame(raw_data, schema=schema)
+
+        transformed = (
+            df.filter((F.col("category").isin(["A", "B"])) & (F.col("active") == "true"))
+            .withColumn("value", F.col("value").cast(IntegerType()))
+            .withColumn("active", F.col("active") == F.lit("true"))
+        )
+
+        ti.xcom_push(key="filtered_data", value=[row.asDict() for row in transformed.collect()])
+        transformed.show(truncate=False)
 
     def aggregate_data(**kwargs):
         ti = kwargs["ti"]
         filtered_data = ti.xcom_pull(task_ids="transform_data", key="filtered_data")
-        df = pd.DataFrame(filtered_data)
 
-        aggregated = df.groupby("category")["value"].agg(["count", "sum", "mean"]).reset_index()
-        ti.xcom_push(key="aggregated_data", value=aggregated.to_dict(orient="records"))
-        print("Aggregated results:\n", aggregated)
+        spark = get_spark_session("silver_data_pipeline_aggregate")
+        df = spark.createDataFrame(filtered_data)
+
+        aggregated = (
+            df.groupBy("category")
+            .agg(
+                F.count("value").alias("count"),
+                F.sum("value").alias("sum"),
+                F.mean("value").alias("mean"),
+            )
+            .orderBy("category")
+        )
+
+        ti.xcom_push(key="aggregated_data", value=[row.asDict() for row in aggregated.collect()])
+        aggregated.show(truncate=False)
 
     generate_task = PythonOperator(
         task_id="generate_data",
