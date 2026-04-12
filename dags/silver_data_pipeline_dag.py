@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import pendulum
 import os
+import subprocess
+import sys
 import tempfile
 
 from airflow.providers.standard.operators.python import PythonOperator
@@ -129,7 +131,6 @@ with DAG(
             )
             .orderBy("State_Code")
         )
-
         aggregated.show(truncate=False)
 
     generate_task = PythonOperator(
@@ -148,3 +149,15 @@ with DAG(
     )
 
     generate_task >> transform_task >> aggregate_task
+
+
+def trigger_dag(dag_id: str = "silver_data_pipeline") -> None:
+    """Trigger the Airflow DAG using the current Python environment's Airflow CLI."""
+    cmd = [sys.executable, "-m", "airflow", "dags", "trigger", dag_id]
+    print(f"Triggering DAG '{dag_id}' using: {cmd}")
+    subprocess.run(cmd, check=True)
+    print(f"DAG '{dag_id}' triggered successfully.")
+
+
+if __name__ == "__main__":
+    trigger_dag()
