@@ -22,6 +22,8 @@ Generate sample data, filter rows, convert types, and aggregate results.
 from __future__ import annotations
 
 import pendulum
+import os
+import tempfile
 
 from airflow.providers.standard.operators.python import PythonOperator
 from airflow.sdk import DAG
@@ -43,62 +45,74 @@ with DAG(
     def get_spark_session(app_name: str) -> SparkSession:
         return SparkSession.builder.appName(app_name).getOrCreate()
 
-    def generate_data(**kwargs):
-        rows = [
-            {
-                "id": i,
-                "category": "A" if i % 3 == 0 else "B" if i % 3 == 1 else "C",
-                "value": str(i * 10),
-                "active": "true" if i % 2 == 0 else "false",
-            }
-            for i in range(1, 11)
-        ]
-
-        schema = StructType(
-            [
-                StructField("id", IntegerType(), nullable=False),
-                StructField("category", StringType(), nullable=False),
-                StructField("value", StringType(), nullable=False),
-                StructField("active", StringType(), nullable=False),
-            ]
-        )
+    def transform_data(**kwargs):
+        # Create a temporary directory for intermediate Parquet files
+        # In a production environment, consider a more robust shared storage solution
+        # like S3, GCS, HDFS, or a persistent NFS mount.
+        # For this example, we'll use a temporary directory within the DAGs folder.
+        temp_data_dir = os.path.join(os.path.dirname(__file__), "temp_data")
+        os.makedirs(temp_data_dir, exist_ok=True)
+        temp_dir = tempfile.mkdtemp(prefix="spark_data_", dir=temp_data_dir)
+        output_path = os.path.join(temp_dir, "raw_data.parquet")
 
         spark = get_spark_session("silver_data_pipeline_generate")
-        df = spark.createDataFrame(rows, schema=schema)
-        kwargs["ti"].xcom_push(key="raw_data", value=[row.asDict() for row in df.collect()])
+        
+        # Read from CSV and select appropriate columns
+        csv_path = "/home/justynadanielas/airflow/data/2013.csv"
+        df = spark.read.csv(csv_path, header=True, inferSchema=True)
+        
+        # Select and rename columns to match expected schema
+        df = df.select(
+            F.col("SEQNO").alias("id"),
+            F.col("_STATE").cast(StringType()).alias("category"),
+            F.col("HTM4").cast(StringType()).alias("value"),
+            F.when(F.col("SMOKE100") == 1.0, "true").otherwise("false").alias("active")
+        )
+
+        df.write.mode("overwrite").parquet(output_path)
+        print(output_path)
+        if "ti" in kwargs:
+            kwargs["ti"].xcom_push(key="raw_data_path", value=output_path)
         df.show(truncate=False)
 
-    def transform_data(**kwargs):
-        ti = kwargs["ti"]
-        raw_data = ti.xcom_pull(task_ids="generate_data", key="raw_data")
+    # def transform_data(**kwargs):
+    #     ti = kwargs["ti"]
+    #     raw_data_path = ti.xcom_pull(task_ids="generate_data", key="raw_data_path")
 
-        schema = StructType(
-            [
-                StructField("id", IntegerType(), nullable=False),
-                StructField("category", StringType(), nullable=False),
-                StructField("value", StringType(), nullable=False),
-                StructField("active", StringType(), nullable=False),
-            ]
-        )
+    #     # Create a temporary directory for intermediate Parquet files
+    #     temp_data_dir = os.path.join(os.path.dirname(__file__), "temp_data")
+    #     os.makedirs(temp_data_dir, exist_ok=True)
+    #     temp_dir = tempfile.mkdtemp(prefix="spark_data_", dir=temp_data_dir)
+    #     output_path = os.path.join(temp_dir, "filtered_data.parquet")
 
-        spark = get_spark_session("silver_data_pipeline_transform")
-        df = spark.createDataFrame(raw_data, schema=schema)
+    #     schema = StructType(
+    #         [
+    #             StructField("id", IntegerType(), nullable=False),
+    #             StructField("category", StringType(), nullable=False),
+    #             StructField("value", StringType(), nullable=False),
+    #             StructField("active", BooleanType(), nullable=False), # Changed to BooleanType for consistency after casting
+    #         ]
+    #     )
 
-        transformed = (
-            df.filter((F.col("category").isin(["A", "B"])) & (F.col("active") == "true"))
-            .withColumn("value", F.col("value").cast(IntegerType()))
-            .withColumn("active", F.col("active") == F.lit("true"))
-        )
+    #     spark = get_spark_session("silver_data_pipeline_transform")
+    #     df = spark.read.parquet(raw_data_path)
 
-        ti.xcom_push(key="filtered_data", value=[row.asDict() for row in transformed.collect()])
-        transformed.show(truncate=False)
+    #     transformed = (
+    #         df.filter((F.col("category").isin(["1.0", "2.0"])) & (F.col("active") == "true"))
+    #         .withColumn("value", F.col("value").cast(IntegerType()))
+    #         .withColumn("active", F.col("active") == F.lit("true"))
+    #     )
+        
+    #     transformed.write.mode("overwrite").parquet(output_path)
+    #     kwargs["ti"].xcom_push(key="filtered_data_path", value=output_path)
+    #     transformed.show(truncate=False)
 
     def aggregate_data(**kwargs):
         ti = kwargs["ti"]
-        filtered_data = ti.xcom_pull(task_ids="transform_data", key="filtered_data")
+        filtered_data_path = ti.xcom_pull(task_ids="transform_data", key="filtered_data_path")
 
         spark = get_spark_session("silver_data_pipeline_aggregate")
-        df = spark.createDataFrame(filtered_data)
+        df = spark.read.parquet(filtered_data_path)
 
         aggregated = (
             df.groupBy("category")
@@ -110,7 +124,6 @@ with DAG(
             .orderBy("category")
         )
 
-        ti.xcom_push(key="aggregated_data", value=[row.asDict() for row in aggregated.collect()])
         aggregated.show(truncate=False)
 
     generate_task = PythonOperator(
