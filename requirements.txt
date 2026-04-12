@@ -1,0 +1,11 @@
+# Core orchestration
+apache-airflow==3.0.0
+
+# Spark processing
+pyspark==4.1.1
+
+# Airflow providers used in the DAG
+apache-airflow-providers-standard==1.0.0
+
+# Date/time (used by the DAG)
+pendulum==3.1.0
