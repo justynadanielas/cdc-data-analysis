@@ -1,0 +1,7 @@
+logs/
+data/
+temp_data/
+__pycache__
+*.json.generated
+*.cfg
+*.db

@@ -15,149 +15,101 @@
 # specific language governing permissions and limitations
 # under the License.
 """
-### Silver Data Pipeline DAG
-Generate sample data, filter rows, convert types, and aggregate results.
+### Health Data Pipeline DAG
+
+Orchestrates Bronze → Silver → Gold health data processing (BRFSS 2013 survey).
+All Spark processing logic lives in spark/health_data_pipeline.py.
+
+To run standalone (no Airflow needed):
+    python spark/health_data_pipeline.py
+    python spark/health_data_pipeline.py --input data/2013.csv --output-dir data/pipeline_output
+
+To trigger via Airflow CLI:
+    airflow dags trigger health_data_pipeline
 """
 
 from __future__ import annotations
 
-import pendulum
 import os
-import subprocess
 import sys
-import tempfile
+
+import pendulum
 
 from airflow.providers.standard.operators.python import PythonOperator
 from airflow.sdk import DAG
-from pyspark.sql import SparkSession
-from pyspark.sql import functions as F
-from pyspark.sql.types import BooleanType, IntegerType, StringType, StructField, StructType
+
+# ---------------------------------------------------------------------------
+# Add project root to sys.path so tasks can import spark.health_data_pipeline
+# ---------------------------------------------------------------------------
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
+
+from spark.health_data_pipeline import (  # noqa: E402
+    DEFAULT_INPUT_CSV,
+    DEFAULT_OUTPUT_DIR,
+    get_spark_session,
+    run_bronze,
+    run_silver,
+    run_gold,
+)
+
+
+def _path_safe_run_id(run_id: str) -> str:
+    """Sanitize an Airflow run_id so it is safe to embed in a file-system path."""
+    return run_id.replace(":", "-").replace("+", "").replace("/", "__")
+
 
 with DAG(
     dag_id="health_data_pipeline",
     default_args={"retries": 1},
-    description="Generate data, filter, convert types, and aggregate using Airflow tasks.",
+    description="Bronze → Silver → Gold health data pipeline (BRFSS 2013 survey).",
     schedule=None,
     start_date=pendulum.datetime(2026, 1, 1, tz="UTC"),
     catchup=False,
-    tags=["example", "silver"],
+    tags=["health", "brfss", "spark"],
 ) as dag:
     dag.doc_md = __doc__
 
-    def get_spark_session(app_name: str) -> SparkSession:
-        return SparkSession.builder.appName(app_name).getOrCreate()
+    def task_ingest_raw_data(**kwargs) -> None:
+        """Bronze: read raw CSV → Parquet. Idempotent – overwrites output on re-run."""
+        safe_rid = _path_safe_run_id(kwargs["dag_run"].run_id)
+        output_dir = os.path.join(DEFAULT_OUTPUT_DIR, safe_rid)
+        spark = get_spark_session("health_pipeline_bronze")
+        bronze_path = run_bronze(spark, DEFAULT_INPUT_CSV, output_dir)
+        kwargs["ti"].xcom_push(key="output_dir", value=output_dir)
+        kwargs["ti"].xcom_push(key="bronze_path", value=bronze_path)
 
-    def load_data(**kwargs):
-        # Create a temporary directory for intermediate Parquet files
-        # In a production environment, consider a more robust shared storage solution
-        # like S3, GCS, HDFS, or a persistent NFS mount.
-        # For this example, we'll use a temporary directory within the DAGs folder.
-        temp_data_dir = os.path.join(os.path.dirname(__file__), "temp_data")
-        os.makedirs(temp_data_dir, exist_ok=True)
-        temp_dir = tempfile.mkdtemp(prefix="spark_data_", dir=temp_data_dir)
-        output_path = os.path.join(temp_dir, "raw_data.parquet")
-
-        spark = get_spark_session("health_data_pipeline_generate")
-        
-        # Read from CSV - keep all columns for downstream processing
-        csv_path = "/home/justynadanielas/airflow/data/2013.csv"
-        df = spark.read.csv(csv_path, header=True, inferSchema=True)
-
-        df.write.mode("overwrite").parquet(output_path)
-        print(f"Raw data saved to: {output_path}")
-        print(f"Total records: {df.count()}")
-        if "ti" in kwargs:
-            kwargs["ti"].xcom_push(key="raw_data_path", value=output_path)
-        df.show(10, truncate=False)
-
-    def transform_data(**kwargs):
+    def task_transform_to_silver(**kwargs) -> None:
+        """Silver: clean and enrich Bronze data. Idempotent – overwrites output on re-run."""
         ti = kwargs["ti"]
-        raw_data_path = ti.xcom_pull(task_ids="generate_data", key="raw_data_path")
+        bronze_path = ti.xcom_pull(task_ids="ingest_raw_data", key="bronze_path")
+        output_dir = ti.xcom_pull(task_ids="ingest_raw_data", key="output_dir")
+        spark = get_spark_session("health_pipeline_silver")
+        silver_path = run_silver(spark, bronze_path, output_dir)
+        ti.xcom_push(key="silver_path", value=silver_path)
 
-        # Create a temporary directory for intermediate Parquet files
-        temp_data_dir = os.path.join(os.path.dirname(__file__), "temp_data")
-        os.makedirs(temp_data_dir, exist_ok=True)
-        temp_dir = tempfile.mkdtemp(prefix="spark_data_", dir=temp_data_dir)
-        output_path = os.path.join(temp_dir, "filtered_data.parquet")
-
-        spark = get_spark_session("health_data_pipeline_transform")
-        
-        # Read the raw data from generate_data
-        df = spark.read.parquet(raw_data_path)
-        
-        # Apply transformations equivalent to the SQL
-        transformed = (
-            df.select(
-                F.col("_STATE").alias("State_Code"),
-                F.when(F.col("GENHLTH") == 1, "Excellent")
-                 .when(F.col("GENHLTH") == 2, "Very Good")
-                 .when(F.col("GENHLTH") == 3, "Good")
-                 .when(F.col("GENHLTH") == 4, "Fair")
-                 .when(F.col("GENHLTH") == 5, "Poor")
-                 .otherwise(None)
-                 .alias("General_Health"),
-                (F.col("_BMI5").cast("decimal(10,2)") / 100).alias("BMI_Value"),
-                F.when(F.col("_TOTINDA") == 1, "Active")
-                 .when(F.col("_TOTINDA") == 2, "Inactive")
-                 .otherwise("Unknown")
-                 .alias("Physical_Activity_Status"),
-                F.col("_AGEG5YR").alias("Age_Group_Code"),
-                F.col("_RACE").alias("Race_Code")
-            )
-            .filter(
-                (F.col("GENHLTH") <= 5) &
-                (F.col("_BMI5").isNotNull()) &
-                (F.col("_BMI5") > 0)
-            )
-        )
-        
-        transformed.write.mode("overwrite").parquet(output_path)
-        kwargs["ti"].xcom_push(key="filtered_data_path", value=output_path)
-        transformed.show(truncate=False)
-
-    def aggregate_data(**kwargs):
+    def task_aggregate_to_gold(**kwargs) -> None:
+        """Gold: aggregate Silver data by state and persist results. Idempotent – overwrites output on re-run."""
         ti = kwargs["ti"]
-        filtered_data_path = ti.xcom_pull(task_ids="transform_data", key="filtered_data_path")
+        silver_path = ti.xcom_pull(task_ids="transform_to_silver", key="silver_path")
+        output_dir = ti.xcom_pull(task_ids="ingest_raw_data", key="output_dir")
+        spark = get_spark_session("health_pipeline_gold")
+        run_gold(spark, silver_path, output_dir)
 
-        spark = get_spark_session("health_data_pipeline_aggregate")
-        df = spark.read.parquet(filtered_data_path)
-
-        aggregated = (
-            df.groupBy("State_Code")
-            .agg(
-                F.count("BMI_Value").alias("count"),
-                F.sum("BMI_Value").alias("sum"),
-                F.mean("BMI_Value").alias("mean"),
-            )
-            .orderBy("State_Code")
-        )
-        aggregated.show(truncate=False)
-
-    generate_task = PythonOperator(
-        task_id="generate_data",
-        python_callable=load_data,
+    ingest_task = PythonOperator(
+        task_id="ingest_raw_data",
+        python_callable=task_ingest_raw_data,
     )
 
     transform_task = PythonOperator(
-        task_id="transform_data",
-        python_callable=transform_data,
+        task_id="transform_to_silver",
+        python_callable=task_transform_to_silver,
     )
 
     aggregate_task = PythonOperator(
-        task_id="aggregate_data",
-        python_callable=aggregate_data,
+        task_id="aggregate_to_gold",
+        python_callable=task_aggregate_to_gold,
     )
 
-    generate_task >> transform_task >> aggregate_task
-
-
-def trigger_dag(dag_id: str = "health_data_pipeline") -> None:
-    """Trigger the Airflow DAG using the current Python environment's Airflow CLI."""
-    cmd = [sys.executable, "-m", "airflow", "dags", "trigger", dag_id]
-    print(f"Triggering DAG '{dag_id}' using: {cmd}")
-    subprocess.run(cmd, check=True)
-    print(f"DAG '{dag_id}' triggered successfully.")
-
-
-if __name__ == "__main__":
-    trigger_dag()
+    ingest_task >> transform_task >> aggregate_task
