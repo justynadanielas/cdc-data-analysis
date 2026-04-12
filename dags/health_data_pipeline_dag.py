@@ -34,7 +34,7 @@ from pyspark.sql import functions as F
 from pyspark.sql.types import BooleanType, IntegerType, StringType, StructField, StructType
 
 with DAG(
-    dag_id="silver_data_pipeline",
+    dag_id="health_data_pipeline",
     default_args={"retries": 1},
     description="Generate data, filter, convert types, and aggregate using Airflow tasks.",
     schedule=None,
@@ -47,7 +47,7 @@ with DAG(
     def get_spark_session(app_name: str) -> SparkSession:
         return SparkSession.builder.appName(app_name).getOrCreate()
 
-    def generate_data(**kwargs):
+    def load_data(**kwargs):
         # Create a temporary directory for intermediate Parquet files
         # In a production environment, consider a more robust shared storage solution
         # like S3, GCS, HDFS, or a persistent NFS mount.
@@ -57,7 +57,7 @@ with DAG(
         temp_dir = tempfile.mkdtemp(prefix="spark_data_", dir=temp_data_dir)
         output_path = os.path.join(temp_dir, "raw_data.parquet")
 
-        spark = get_spark_session("silver_data_pipeline_generate")
+        spark = get_spark_session("health_data_pipeline_generate")
         
         # Read from CSV - keep all columns for downstream processing
         csv_path = "/home/justynadanielas/airflow/data/2013.csv"
@@ -80,7 +80,7 @@ with DAG(
         temp_dir = tempfile.mkdtemp(prefix="spark_data_", dir=temp_data_dir)
         output_path = os.path.join(temp_dir, "filtered_data.parquet")
 
-        spark = get_spark_session("silver_data_pipeline_transform")
+        spark = get_spark_session("health_data_pipeline_transform")
         
         # Read the raw data from generate_data
         df = spark.read.parquet(raw_data_path)
@@ -119,7 +119,7 @@ with DAG(
         ti = kwargs["ti"]
         filtered_data_path = ti.xcom_pull(task_ids="transform_data", key="filtered_data_path")
 
-        spark = get_spark_session("silver_data_pipeline_aggregate")
+        spark = get_spark_session("health_data_pipeline_aggregate")
         df = spark.read.parquet(filtered_data_path)
 
         aggregated = (
@@ -135,7 +135,7 @@ with DAG(
 
     generate_task = PythonOperator(
         task_id="generate_data",
-        python_callable=generate_data,
+        python_callable=load_data,
     )
 
     transform_task = PythonOperator(
@@ -151,7 +151,7 @@ with DAG(
     generate_task >> transform_task >> aggregate_task
 
 
-def trigger_dag(dag_id: str = "silver_data_pipeline") -> None:
+def trigger_dag(dag_id: str = "health_data_pipeline") -> None:
     """Trigger the Airflow DAG using the current Python environment's Airflow CLI."""
     cmd = [sys.executable, "-m", "airflow", "dags", "trigger", dag_id]
     print(f"Triggering DAG '{dag_id}' using: {cmd}")
