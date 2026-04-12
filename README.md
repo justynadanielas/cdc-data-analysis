@@ -12,7 +12,7 @@ Libraries defined in requirements.txt + Java 17
 
 ```bash
 # 1. Clone the repo and enter its directory
-git clone <repo-url>
+git clone https://github.com/justynadanielas/cdc-data-analysis
 
 # 2. Create and activate a virtual environment
 python -m venv venv
