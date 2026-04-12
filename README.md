@@ -4,6 +4,41 @@ Processes the [BRFSS 2013 health survey](https://www.cdc.gov/brfss/) CSV through
 
 ---
 
+## Prerequisites
+
+Libraries defined in requirements.txt + Java 17
+
+### Setup
+
+```bash
+# 1. Clone the repo and enter its directory
+git clone <repo-url>
+
+# 2. Create and activate a virtual environment
+python -m venv venv
+source venv/bin/activate          # Windows: venv\Scripts\activate
+
+# 3. Install Python dependencies
+pip install -r requirements.txt
+
+# 4. Download the source data (see "Source Data" section below)
+```
+
+---
+
+## Source Data
+
+The pipeline expects the **BRFSS 2013 Behavioral Risk Factor Surveillance System** dataset at `data/2013.csv`.
+
+1. Go to the Kaggle dataset page:
+   **<https://www.kaggle.com/datasets/cdc/behavioral-risk-factor-surveillance-system?select=2013.csv>**
+2. Click **Download** (requires a free Kaggle account) and select `2013.csv`, or download the full dataset and extract `2013.csv`.
+3. Place the file at `data/2013.csv` inside the project root.
+
+> The file is ~1 GB. `data/` is gitignored so it is never committed.
+
+---
+
 ## Architecture
 
 ```mermaid
@@ -59,23 +94,6 @@ Each DAG run writes its output under `data/pipeline_output/<run_id>/` so runs ar
 
 ---
 
-## Repository Structure
-
-```
-airflow/
-├── dags/
-│   └── health_data_pipeline_dag.py   # Airflow DAG – thin orchestration only
-├── spark/
-│   ├── __init__.py
-│   └── health_data_pipeline.py       # Spark pipeline – single entry point
-├── data/
-│   └── 2013.csv                      # Source data (BRFSS 2013)
-├── pipeline_flow.md                  # Mermaid diagram source
-└── README.md                         # This file
-```
-
----
-
 ## Running the Pipeline
 
 ### Standalone (no Airflow required)
@@ -99,16 +117,3 @@ airflow standalone
 # Trigger the DAG
 airflow dags trigger health_data_pipeline
 ```
-
----
-
-## Silver Layer – Transformations
-
-| Source column | Output column            | Transformation                                  |
-|---------------|--------------------------|-------------------------------------------------|
-| `_STATE`      | `State_Code`             | Kept as-is                                      |
-| `GENHLTH`     | `General_Health`         | 1–5 mapped to Excellent/Very Good/Good/Fair/Poor; other values dropped |
-| `_BMI5`       | `BMI_Value`              | Divided by 100 (stored as ×100 int); null/zero rows dropped |
-| `_TOTINDA`    | `Physical_Activity_Status` | 1 → Active, 2 → Inactive, other → Unknown     |
-| `_AGEG5YR`    | `Age_Group_Code`         | Kept as-is                                      |
-| `_RACE`       | `Race_Code`              | Kept as-is                                      |
