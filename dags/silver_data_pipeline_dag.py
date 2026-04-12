@@ -45,7 +45,7 @@ with DAG(
     def get_spark_session(app_name: str) -> SparkSession:
         return SparkSession.builder.appName(app_name).getOrCreate()
 
-    def transform_data(**kwargs):
+    def generate_data(**kwargs):
         # Create a temporary directory for intermediate Parquet files
         # In a production environment, consider a more robust shared storage solution
         # like S3, GCS, HDFS, or a persistent NFS mount.
@@ -57,55 +57,61 @@ with DAG(
 
         spark = get_spark_session("silver_data_pipeline_generate")
         
-        # Read from CSV and select appropriate columns
+        # Read from CSV - keep all columns for downstream processing
         csv_path = "/home/justynadanielas/airflow/data/2013.csv"
         df = spark.read.csv(csv_path, header=True, inferSchema=True)
-        
-        # Select and rename columns to match expected schema
-        df = df.select(
-            F.col("SEQNO").alias("id"),
-            F.col("_STATE").cast(StringType()).alias("category"),
-            F.col("HTM4").cast(StringType()).alias("value"),
-            F.when(F.col("SMOKE100") == 1.0, "true").otherwise("false").alias("active")
-        )
 
         df.write.mode("overwrite").parquet(output_path)
-        print(output_path)
+        print(f"Raw data saved to: {output_path}")
+        print(f"Total records: {df.count()}")
         if "ti" in kwargs:
             kwargs["ti"].xcom_push(key="raw_data_path", value=output_path)
-        df.show(truncate=False)
+        df.show(10, truncate=False)
 
-    # def transform_data(**kwargs):
-    #     ti = kwargs["ti"]
-    #     raw_data_path = ti.xcom_pull(task_ids="generate_data", key="raw_data_path")
+    def transform_data(**kwargs):
+        ti = kwargs["ti"]
+        raw_data_path = ti.xcom_pull(task_ids="generate_data", key="raw_data_path")
 
-    #     # Create a temporary directory for intermediate Parquet files
-    #     temp_data_dir = os.path.join(os.path.dirname(__file__), "temp_data")
-    #     os.makedirs(temp_data_dir, exist_ok=True)
-    #     temp_dir = tempfile.mkdtemp(prefix="spark_data_", dir=temp_data_dir)
-    #     output_path = os.path.join(temp_dir, "filtered_data.parquet")
+        # Create a temporary directory for intermediate Parquet files
+        temp_data_dir = os.path.join(os.path.dirname(__file__), "temp_data")
+        os.makedirs(temp_data_dir, exist_ok=True)
+        temp_dir = tempfile.mkdtemp(prefix="spark_data_", dir=temp_data_dir)
+        output_path = os.path.join(temp_dir, "filtered_data.parquet")
 
-    #     schema = StructType(
-    #         [
-    #             StructField("id", IntegerType(), nullable=False),
-    #             StructField("category", StringType(), nullable=False),
-    #             StructField("value", StringType(), nullable=False),
-    #             StructField("active", BooleanType(), nullable=False), # Changed to BooleanType for consistency after casting
-    #         ]
-    #     )
-
-    #     spark = get_spark_session("silver_data_pipeline_transform")
-    #     df = spark.read.parquet(raw_data_path)
-
-    #     transformed = (
-    #         df.filter((F.col("category").isin(["1.0", "2.0"])) & (F.col("active") == "true"))
-    #         .withColumn("value", F.col("value").cast(IntegerType()))
-    #         .withColumn("active", F.col("active") == F.lit("true"))
-    #     )
+        spark = get_spark_session("silver_data_pipeline_transform")
         
-    #     transformed.write.mode("overwrite").parquet(output_path)
-    #     kwargs["ti"].xcom_push(key="filtered_data_path", value=output_path)
-    #     transformed.show(truncate=False)
+        # Read the raw data from generate_data
+        df = spark.read.parquet(raw_data_path)
+        
+        # Apply transformations equivalent to the SQL
+        transformed = (
+            df.select(
+                F.col("_STATE").alias("State_Code"),
+                F.when(F.col("GENHLTH") == 1, "Excellent")
+                 .when(F.col("GENHLTH") == 2, "Very Good")
+                 .when(F.col("GENHLTH") == 3, "Good")
+                 .when(F.col("GENHLTH") == 4, "Fair")
+                 .when(F.col("GENHLTH") == 5, "Poor")
+                 .otherwise(None)
+                 .alias("General_Health"),
+                (F.col("_BMI5").cast("decimal(10,2)") / 100).alias("BMI_Value"),
+                F.when(F.col("_TOTINDA") == 1, "Active")
+                 .when(F.col("_TOTINDA") == 2, "Inactive")
+                 .otherwise("Unknown")
+                 .alias("Physical_Activity_Status"),
+                F.col("_AGEG5YR").alias("Age_Group_Code"),
+                F.col("_RACE").alias("Race_Code")
+            )
+            .filter(
+                (F.col("GENHLTH") <= 5) &
+                (F.col("_BMI5").isNotNull()) &
+                (F.col("_BMI5") > 0)
+            )
+        )
+        
+        transformed.write.mode("overwrite").parquet(output_path)
+        kwargs["ti"].xcom_push(key="filtered_data_path", value=output_path)
+        transformed.show(truncate=False)
 
     def aggregate_data(**kwargs):
         ti = kwargs["ti"]
@@ -115,13 +121,13 @@ with DAG(
         df = spark.read.parquet(filtered_data_path)
 
         aggregated = (
-            df.groupBy("category")
+            df.groupBy("State_Code")
             .agg(
-                F.count("value").alias("count"),
-                F.sum("value").alias("sum"),
-                F.mean("value").alias("mean"),
+                F.count("BMI_Value").alias("count"),
+                F.sum("BMI_Value").alias("sum"),
+                F.mean("BMI_Value").alias("mean"),
             )
-            .orderBy("category")
+            .orderBy("State_Code")
         )
 
         aggregated.show(truncate=False)
