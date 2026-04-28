@@ -6,7 +6,7 @@ Processes the [BRFSS 2013 health survey](https://www.cdc.gov/brfss/) CSV through
 
 ## Prerequisites
 
-Libraries defined in requirements.txt + Java 17
+Libraries defined in `requirements.txt` + **Java 17** + **Docker** (for the Kafka stack)
 
 ### Setup
 
@@ -22,6 +22,9 @@ source venv/bin/activate          # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 
 # 4. Download the source data (see "Source Data" section below)
+
+# 5. (Optional) Start the local Kafka stack
+docker compose up -d
 ```
 
 ---
@@ -41,13 +44,17 @@ The pipeline expects the **BRFSS 2013 Behavioral Risk Factor Surveillance System
 
 ## Architecture
 
+Two ingestion paths share the same Silver and Gold processing logic.
+
+### Path A — Direct CSV (original)
+
 ```mermaid
 flowchart TD
     subgraph inputs["Inputs"]
         CSV["data/2013.csv<br/>(BRFSS 2013 Survey)"]
     end
 
-    subgraph orchestration["Orchestration – Airflow DAG: health_data_pipeline"]
+    subgraph orchestration["Airflow DAG: health_data_pipeline"]
         T1["ingest_raw_data<br/>(Bronze task)"]
         T2["transform_to_silver<br/>(Silver task)"]
         T3["aggregate_to_gold<br/>(Gold task)"]
@@ -80,15 +87,76 @@ flowchart TD
     style storage fill:#e8fce8,stroke:#4caf50
 ```
 
+### Path B — Kafka Queue (new)
+
+```mermaid
+flowchart TD
+    subgraph inputs["Inputs"]
+        CSV["data/2013.csv<br/>(BRFSS 2013 Survey)"]
+    end
+
+    subgraph kafka_stack["Kafka Stack (docker compose)"]
+        BROKER["Kafka Broker<br/>localhost:9092<br/>(KRaft – no Zookeeper)"]
+        TOPIC[("Topic:<br/>health-data-raw")]
+        UI["Kafka UI<br/>localhost:8081"]
+        BROKER --- TOPIC
+        BROKER --- UI
+    end
+
+    subgraph orchestration["Airflow DAG: health_data_pipeline_kafka"]
+        FS["watch_for_data<br/>(FileSensor)"]
+        P["produce_to_kafka"]
+        C["consume_from_kafka_to_bronze"]
+        T2["transform_to_silver"]
+        T3["aggregate_to_gold"]
+        FS --> P --> C --> T2 --> T3
+    end
+
+    subgraph producer_module["spark/kafka_producer.py"]
+        PROD["produce_csv_to_kafka()<br/>pandas chunks → JSON messages"]
+    end
+
+    subgraph spark_module["spark/health_data_pipeline.py"]
+        S1K["run_bronze_from_kafka()<br/>Consume Kafka → Parquet"]
+        S2["run_silver()"]
+        S3["run_gold()"]
+    end
+
+    subgraph storage["Outputs – data/pipeline_output/<run_id>/"]
+        B[("bronze/<br/>raw_data.parquet")]
+        SL[("silver/<br/>filtered_data.parquet")]
+        G[("gold/<br/>aggregated_by_state.parquet")]
+    end
+
+    CSV -- "file present?" --> FS
+    P -- "delegates to" --> PROD
+    PROD -- "publish JSON rows" --> BROKER
+    C -- "delegates to" --> S1K
+    S1K -- "consume from" --> TOPIC
+    T2 -- "delegates to" --> S2
+    T3 -- "delegates to" --> S3
+    S1K -- "writes" --> B
+    S2 -- "reads/writes" --> SL
+    S3 -- "reads/writes" --> G
+
+    style inputs fill:#f5f5f5,stroke:#ccc
+    style kafka_stack fill:#fff0f0,stroke:#e53935
+    style orchestration fill:#e8f4fd,stroke:#5b9bd5
+    style producer_module fill:#fce8ff,stroke:#9c27b0
+    style spark_module fill:#fff7e6,stroke:#f0a500
+    style storage fill:#e8fce8,stroke:#4caf50
+```
+
 ---
 
 ## Pipeline Layers
 
-| Layer  | Task               | Spark function   | Output path                                    | What happens                                       |
-|--------|--------------------|------------------|------------------------------------------------|----------------------------------------------------|
-| Bronze | `ingest_raw_data`  | `run_bronze()`   | `bronze/raw_data.parquet`                      | Raw CSV ingested as-is; no schema changes          |
-| Silver | `transform_to_silver` | `run_silver()` | `silver/filtered_data.parquet`               | Invalid rows dropped; columns cleaned and labelled |
-| Gold   | `aggregate_to_gold` | `run_gold()`    | `gold/aggregated_by_state.parquet`             | BMI aggregated by US state for analytics           |
+| Layer  | Task                          | Spark function            | Output path                        | What happens                                       |
+|--------|-------------------------------|---------------------------|------------------------------------|----------------------------------------------------|
+| Bronze | `ingest_raw_data`             | `run_bronze()`            | `bronze/raw_data.parquet`          | Raw CSV ingested as-is; no schema changes          |
+| Bronze | `consume_from_kafka_to_bronze`| `run_bronze_from_kafka()` | `bronze/raw_data.parquet`          | Kafka messages consumed and written as Parquet     |
+| Silver | `transform_to_silver`         | `run_silver()`            | `silver/filtered_data.parquet`     | Invalid rows dropped; columns cleaned and labelled |
+| Gold   | `aggregate_to_gold`           | `run_gold()`              | `gold/aggregated_by_state.parquet` | BMI aggregated by US state for analytics           |
 
 Each DAG run writes its output under `data/pipeline_output/<run_id>/` so runs are isolated and **idempotent** — re-running the same DAG run safely overwrites its own output without touching other runs.
 
@@ -108,7 +176,7 @@ python spark/health_data_pipeline.py \
   --output-dir data/pipeline_output
 ```
 
-### Via Airflow
+### Via Airflow – Direct CSV path (original DAG)
 
 ```bash
 # Start the Airflow server
@@ -116,4 +184,38 @@ airflow standalone
 
 # Trigger the DAG
 airflow dags trigger health_data_pipeline
+```
+
+### Via Airflow – Kafka path (new DAG)
+
+```bash
+# 1. Start local Kafka (KRaft mode, no Zookeeper)
+docker compose up -d
+
+# Kafka UI is available at http://localhost:8081
+
+# 2. Start the Airflow server (if not already running)
+airflow standalone
+
+# 3. Trigger the Kafka DAG – the FileSensor will detect data/2013.csv
+#    and automatically kick off the pipeline
+airflow dags trigger health_data_pipeline_kafka
+
+# To use an external Kafka cluster, set the env var before starting Airflow:
+export KAFKA_BOOTSTRAP_SERVERS=your-broker:9092
+airflow standalone
+```
+
+### Standalone Kafka producer (test the queue without Airflow)
+
+```bash
+# Publish all CSV rows to Kafka (requires Kafka to be running)
+python spark/kafka_producer.py
+
+# Custom options
+python spark/kafka_producer.py \
+  --input data/2013.csv \
+  --bootstrap-servers localhost:9092 \
+  --topic health-data-raw \
+  --chunk-size 5000
 ```

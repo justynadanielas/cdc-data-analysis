@@ -23,6 +23,7 @@ Run on a Spark cluster:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 
 from pyspark.sql import SparkSession
@@ -34,6 +35,102 @@ from pyspark.sql import functions as F
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_INPUT_CSV = os.path.join(_PROJECT_ROOT, "data", "2013.csv")
 DEFAULT_OUTPUT_DIR = os.path.join(_PROJECT_ROOT, "data", "pipeline_output")
+
+# ---------------------------------------------------------------------------
+# Kafka defaults – overridable via the KAFKA_BOOTSTRAP_SERVERS environment
+# variable so no code changes are needed to point at an external cluster.
+# ---------------------------------------------------------------------------
+DEFAULT_KAFKA_BOOTSTRAP_SERVERS: str = os.environ.get(
+    "KAFKA_BOOTSTRAP_SERVERS", "localhost:9092"
+)
+DEFAULT_KAFKA_TOPIC: str = "health-data-raw"
+
+
+# ---------------------------------------------------------------------------
+# Kafka → Bronze function  (new path; does NOT replace run_bronze)
+# ---------------------------------------------------------------------------
+
+def run_bronze_from_kafka(
+    spark: SparkSession,
+    output_dir: str,
+    bootstrap_servers: str = DEFAULT_KAFKA_BOOTSTRAP_SERVERS,
+    topic: str = DEFAULT_KAFKA_TOPIC,
+    group_id: str = "health_pipeline_bronze_consumer",
+) -> str:
+    """Consume all messages from a Kafka topic and write them as Bronze Parquet.
+
+    Uses ``kafka-python``'s ``KafkaConsumer`` (not spark-sql-kafka) to avoid
+    JAR version-compatibility issues with PySpark 4.x.  Suitable for
+    development / moderate-scale workloads.
+
+    The consumer always starts from the beginning of the topic
+    (``auto_offset_reset='earliest'``) and stops once it has caught up to the
+    latest offset, making the operation deterministic and idempotent for a
+    given topic state.
+
+    Args:
+        spark:             Active SparkSession.
+        output_dir:        Base output directory; a ``bronze/`` subdirectory is
+                           created (same path as ``run_bronze``).
+        bootstrap_servers: Comma-separated Kafka broker addresses.
+        topic:             Kafka topic to consume from.
+        group_id:          Kafka consumer group ID.  Use a unique value per DAG
+                           run if you need each run to consume independently.
+
+    Returns:
+        Path to the written Parquet directory.
+
+    Raises:
+        RuntimeError: If no messages are found on the topic.
+    """
+    # Import here so that environments without kafka-python installed can still
+    # use the direct-CSV path without ImportError at module load time.
+    from kafka import KafkaConsumer  # noqa: PLC0415
+    from kafka import TopicPartition  # noqa: PLC0415
+
+    output_path = os.path.join(output_dir, "bronze", "raw_data.parquet")
+
+    consumer = KafkaConsumer(
+        bootstrap_servers=bootstrap_servers,
+        group_id=group_id,
+        auto_offset_reset="earliest",
+        enable_auto_commit=False,
+        value_deserializer=lambda v: json.loads(v.decode("utf-8")),
+        # Stop polling once we reach the end of the partition
+        consumer_timeout_ms=5_000,
+    )
+    consumer.subscribe([topic])
+
+    # Force partition assignment by polling once, then seek to beginning so we
+    # always replay the full topic (idempotent behaviour).
+    consumer.poll(timeout_ms=2_000)
+    partitions = consumer.assignment()
+    if not partitions:
+        consumer.close()
+        raise RuntimeError(
+            f"No partitions assigned for topic '{topic}'. "
+            "Ensure Kafka is running and the topic exists."
+        )
+    consumer.seek_to_beginning(*partitions)
+
+    records: list[dict] = []
+    for msg in consumer:
+        records.append(msg.value)
+
+    consumer.close()
+
+    if not records:
+        raise RuntimeError(
+            f"No messages found on topic '{topic}'. "
+            "Run the producer first (spark/kafka_producer.py)."
+        )
+
+    import pandas as pd  # noqa: PLC0415 – pandas already in requirements.txt
+    df = spark.createDataFrame(pd.DataFrame(records))
+    # df = spark.createDataFrame(records)
+    df.write.mode("overwrite").parquet(output_path)
+    print(f"[BRONZE/KAFKA] {df.count():,} records written → {output_path}")
+    return output_path
 
 
 def get_spark_session(app_name: str = "health_data_pipeline") -> SparkSession:
