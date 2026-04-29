@@ -2,7 +2,8 @@ services:
   kafka:
     image: apache/kafka:3.9.0
     container_name: kafka
-    network_mode: "host"
+    ports:
+      - "9092:9092"
     environment:
       CLUSTER_ID: q1Sh3IEmQaeRkiklNDOuYg
       KAFKA_NODE_ID: 1

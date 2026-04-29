@@ -11,7 +11,7 @@ apache-airflow-providers-standard==1.0.0
 pendulum==3.1.0
 
 # Kafka integration (queue system)
-kafka-python==2.0.6
+kafka-python-ng==2.2.3
 
 # CSV chunked reading for the Kafka producer
 pandas==2.2.3
