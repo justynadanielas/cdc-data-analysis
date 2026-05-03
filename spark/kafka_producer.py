@@ -45,6 +45,7 @@ def produce_csv_to_kafka(
     topic: str = KAFKA_TOPIC,
     bootstrap_servers: str = KAFKA_BOOTSTRAP_SERVERS,
     chunk_size: int = 10_000,
+    max_records: int | None = None,
 ) -> dict:
     """Read a CSV file in chunks and publish each row as a JSON message to Kafka.
 
@@ -53,6 +54,8 @@ def produce_csv_to_kafka(
         topic:             Kafka topic to publish messages to.
         bootstrap_servers: Comma-separated Kafka broker addresses.
         chunk_size:        Number of rows per chunk read from the CSV.
+        max_records:       Stop after sending this many records.  ``None``
+                           (default) sends the entire file.
 
     Returns:
         XCom-compatible dict with keys ``records_sent``, ``topic``, ``chunks``.
@@ -68,14 +71,23 @@ def produce_csv_to_kafka(
 
     records_sent = 0
     chunks = 0
+    done = False
 
     for chunk in pd.read_csv(csv_path, chunksize=chunk_size):
+        if max_records is not None:
+            remaining = max_records - records_sent
+            if remaining <= 0:
+                break
+            chunk = chunk.iloc[:remaining]
+            done = len(chunk) < chunk_size  # last partial chunk
         for record in chunk.to_dict(orient="records"):
             producer.send(topic, value=record)
         producer.flush()
         records_sent += len(chunk)
         chunks += 1
         print(f"[PRODUCER] chunk {chunks:4d} — {records_sent:,} records sent so far")
+        if done:
+            break
 
     producer.close()
 
@@ -122,6 +134,14 @@ def _parse_args() -> argparse.Namespace:
         metavar="N",
         help="Number of CSV rows per chunk.",
     )
+    parser.add_argument(
+        "--max-records",
+        default=None,
+        dest="max_records",
+        type=int,
+        metavar="N",
+        help="Stop after sending N records (default: send entire file).",
+    )
     return parser.parse_args()
 
 
@@ -132,6 +152,7 @@ def main() -> None:
         topic=args.topic,
         bootstrap_servers=args.bootstrap_servers,
         chunk_size=args.chunk_size,
+        max_records=args.max_records,
     )
     print(
         f"\nProducer complete: {result['records_sent']:,} records sent "
