@@ -104,20 +104,22 @@ flowchart TD
     end
 
     subgraph orchestration["Airflow DAG: health_data_pipeline_kafka"]
-        FS["watch_for_data<br/>(FileSensor)"]
         P["produce_to_kafka"]
         C["consume_from_kafka_to_bronze"]
         T2["transform_to_silver"]
         T3["aggregate_to_gold"]
-        FS --> P --> C --> T2 --> T3
+        P --> C --> T2 --> T3
     end
 
     subgraph producer_module["spark/kafka_producer.py"]
         PROD["produce_csv_to_kafka()<br/>pandas chunks → JSON messages"]
     end
 
+    subgraph consumer_module["spark/kafka_consumer.py"]
+        S1K["consume_kafka_to_bronze()<br/>Consume Kafka → Parquet"]
+    end
+
     subgraph spark_module["spark/health_data_pipeline.py"]
-        S1K["run_bronze_from_kafka()<br/>Consume Kafka → Parquet"]
         S2["run_silver()"]
         S3["run_gold()"]
     end
@@ -128,7 +130,7 @@ flowchart TD
         G[("gold/<br/>aggregated_by_state.parquet")]
     end
 
-    CSV -- "file present?" --> FS
+    CSV -- "reads" --> P
     P -- "delegates to" --> PROD
     PROD -- "publish JSON rows" --> BROKER
     C -- "delegates to" --> S1K
@@ -143,6 +145,7 @@ flowchart TD
     style kafka_stack fill:#fff0f0,stroke:#e53935
     style orchestration fill:#e8f4fd,stroke:#5b9bd5
     style producer_module fill:#fce8ff,stroke:#9c27b0
+    style consumer_module fill:#e8ffe8,stroke:#2e7d32
     style spark_module fill:#fff7e6,stroke:#f0a500
     style storage fill:#e8fce8,stroke:#4caf50
 ```
@@ -154,7 +157,7 @@ flowchart TD
 | Layer  | Task                          | Spark function            | Output path                        | What happens                                       |
 |--------|-------------------------------|---------------------------|------------------------------------|----------------------------------------------------|
 | Bronze | `ingest_raw_data`             | `run_bronze()`            | `bronze/raw_data.parquet`          | Raw CSV ingested as-is; no schema changes          |
-| Bronze | `consume_from_kafka_to_bronze`| `run_bronze_from_kafka()` | `bronze/raw_data.parquet`          | Kafka messages consumed and written as Parquet     |
+| Bronze | `consume_from_kafka_to_bronze`| `consume_kafka_to_bronze()` | `bronze/raw_data.parquet`          | Kafka messages consumed and written as Parquet     |
 | Silver | `transform_to_silver`         | `run_silver()`            | `silver/filtered_data.parquet`     | Invalid rows dropped; columns cleaned and labelled |
 | Gold   | `aggregate_to_gold`           | `run_gold()`              | `gold/aggregated_by_state.parquet` | BMI aggregated by US state for analytics           |
 
@@ -197,6 +200,6 @@ docker compose up -d
 # 2. Start the Airflow server (if not already running)
 airflow standalone
 
-# 3. Trigger the Kafka DAG
+# 3. Trigger the Kafka DAG (it is scheduled to run daily)
 airflow dags trigger health_data_pipeline_kafka
 ```
