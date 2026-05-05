@@ -197,25 +197,6 @@ docker compose up -d
 # 2. Start the Airflow server (if not already running)
 airflow standalone
 
-# 3. Trigger the Kafka DAG – the FileSensor will detect data/2013.csv
-#    and automatically kick off the pipeline
+# 3. Trigger the Kafka DAG
 airflow dags trigger health_data_pipeline_kafka
-
-# To use an external Kafka cluster, set the env var before starting Airflow:
-export KAFKA_BOOTSTRAP_SERVERS=your-broker:9092
-airflow standalone
-```
-
-### Standalone Kafka producer (test the queue without Airflow)
-
-```bash
-# Publish all CSV rows to Kafka (requires Kafka to be running)
-python spark/kafka_producer.py
-
-# Custom options
-python spark/kafka_producer.py \
-  --input data/2013.csv \
-  --bootstrap-servers localhost:9092 \
-  --topic health-data-raw \
-  --chunk-size 5000
 ```
