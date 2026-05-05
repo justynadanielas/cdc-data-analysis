@@ -32,9 +32,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import tempfile
 import time
 
-import pandas as pd
 from kafka import KafkaConsumer
 from pyspark.sql import SparkSession
 
@@ -61,6 +61,7 @@ def consume_kafka_to_bronze(
     output_dir: str = DEFAULT_OUTPUT_DIR,
     consumer_group: str = DEFAULT_CONSUMER_GROUP,
     idle_timeout_s: int = 60,
+    batch_size: int = 10_000,
 ) -> str:
     """Consume a Kafka topic and write all messages as Bronze Parquet.
 
@@ -80,13 +81,14 @@ def consume_kafka_to_bronze(
                            independently.
         idle_timeout_s:    Seconds without new messages before the consumer
                            stops polling and proceeds to write Parquet.
+        batch_size:        Number of records to buffer in memory before
+                           flushing to the temp JSONL file.
 
     Returns:
         Absolute path to the written Parquet directory.
 
     Raises:
-        RuntimeError: If no messages are found on the topic after the first
-                      poll attempt, or if Kafka is unreachable.
+        RuntimeError: If no messages are found on the topic.
     """
     output_path = os.path.join(output_dir, "bronze", "raw_data.parquet")
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
@@ -98,30 +100,39 @@ def consume_kafka_to_bronze(
         auto_offset_reset="earliest",
         enable_auto_commit=False,
         value_deserializer=lambda v: json.loads(v.decode("utf-8")),
-        # poll() call timeout – short to react quickly to idle condition
-        consumer_timeout_ms=1_000,
     )
 
     print(
         f"[CONSUMER] Subscribed to '{topic}' as group '{consumer_group}'. "
-        f"Idle timeout: {idle_timeout_s}s"
+        f"Idle timeout: {idle_timeout_s}s | batch size: {batch_size:,}"
     )
 
-    records: list[dict] = []
+    # Stream records to a temp JSONL file — avoids holding the full dataset
+    # in memory (list + pandas + Spark = 3 copies → WSL OOM crash).
+    tmp_file = tempfile.NamedTemporaryFile(
+        mode="w", suffix=".jsonl", delete=False, dir=os.path.dirname(output_path)
+    )
+    tmp_path = tmp_file.name
+    total_records = 0
+    batch: list[str] = []
     last_message_time = time.monotonic()
 
     try:
         while True:
             # poll() returns {TopicPartition: [ConsumerRecord, ...]}
-            batch = consumer.poll(timeout_ms=1_000)
+            raw_batch = consumer.poll(timeout_ms=1_000)
 
-            if batch:
-                for partition_records in batch.values():
+            if raw_batch:
+                for partition_records in raw_batch.values():
                     for msg in partition_records:
-                        records.append(msg.value)
+                        batch.append(json.dumps(msg.value))
+                        if len(batch) >= batch_size:
+                            tmp_file.write("\n".join(batch) + "\n")
+                            total_records += len(batch)
+                            batch.clear()
                 last_message_time = time.monotonic()
                 print(
-                    f"[CONSUMER] {len(records):,} records accumulated …",
+                    f"[CONSUMER] {total_records + len(batch):,} records received …",
                     end="\r",
                     flush=True,
                 )
@@ -134,26 +145,35 @@ def consume_kafka_to_bronze(
                     )
                     break
 
-        if not records:
+        # Flush remaining records
+        if batch:
+            tmp_file.write("\n".join(batch) + "\n")
+            total_records += len(batch)
+            batch.clear()
+        tmp_file.close()
+
+        if total_records == 0:
             raise RuntimeError(
                 f"No messages found on topic '{topic}'. "
                 "Run the producer first (spark/kafka_producer.py)."
             )
 
-        print(f"[CONSUMER] {len(records):,} total records — writing Parquet …")
+        print(f"[CONSUMER] {total_records:,} total records — writing Parquet …")
 
         spark = SparkSession.builder.appName("kafka_consumer_bronze").getOrCreate()
-        df = spark.createDataFrame(pd.DataFrame(records))
+        # Read JSONL lazily — no full dataset copy in Python memory
+        df = spark.read.json(tmp_path)
         df.write.mode("overwrite").parquet(output_path)
 
         # Commit offsets only after successful Parquet write (at-least-once)
         consumer.commit()
 
-        row_count = df.count()
-        print(f"[CONSUMER] {row_count:,} records written → {output_path}")
+        print(f"[CONSUMER] {df.count():,} records written → {output_path}")
 
     finally:
         consumer.close()
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
 
     return output_path
 
