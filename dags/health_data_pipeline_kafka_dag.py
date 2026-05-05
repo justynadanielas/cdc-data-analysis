@@ -57,7 +57,7 @@ with DAG(
     dag_id="health_data_pipeline_kafka",
     default_args={"retries": 1},
     description="CSV → Kafka → Bronze → Silver → Gold health data pipeline (BRFSS 2013).",
-    schedule=None,
+    schedule="@daily",
     start_date=pendulum.datetime(2026, 1, 1, tz="UTC"),
     catchup=False,
     tags=["health", "brfss", "spark", "kafka"],

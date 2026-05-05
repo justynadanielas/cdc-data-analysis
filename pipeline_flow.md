@@ -5,7 +5,7 @@ flowchart TD
     end
 
     subgraph kafka_stack["Kafka Stack (docker compose)"]
-        BROKER["Kafka Broker<br/>localhost:9092<br/>(KRaft – no ZooKeeper)"]
+        BROKER["Kafka Broker<br/>localhost:9092<br/>(KRaft)"]
         TOPIC[("Topic:<br/>health-data-raw")]
         BROKER --- TOPIC
     end
