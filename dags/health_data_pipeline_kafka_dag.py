@@ -35,6 +35,7 @@ if _PROJECT_ROOT not in sys.path:
 from spark.health_data_pipeline import (  # noqa: E402
     DEFAULT_INPUT_CSV,
     DEFAULT_OUTPUT_DIR,
+    DEFAULT_REF_STATE_CODES_CSV,
     get_spark_session,
     run_silver,
     run_gold,
@@ -135,7 +136,7 @@ with DAG(
             )
 
         spark = get_spark_session("health_kafka_gold")
-        run_gold(spark, silver_path, output_dir)
+        run_gold(spark, silver_path, output_dir, DEFAULT_REF_STATE_CODES_CSV)
 
     # -------------------------------------------------------------------------
     # Wire up tasks

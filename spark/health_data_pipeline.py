@@ -35,6 +35,7 @@ from pyspark.sql import functions as F
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_INPUT_CSV = os.path.join(_PROJECT_ROOT, "data", "2013.csv")
 DEFAULT_OUTPUT_DIR = os.path.join(_PROJECT_ROOT, "data", "pipeline_output")
+DEFAULT_REF_STATE_CODES_CSV = os.path.join(_PROJECT_ROOT, "data", "ref_state_codes.csv")
 
 # ---------------------------------------------------------------------------
 # Kafka defaults – overridable via the KAFKA_BOOTSTRAP_SERVERS environment
@@ -216,7 +217,12 @@ def run_silver(spark: SparkSession, bronze_path: str, output_dir: str) -> str:
     return output_path
 
 
-def run_gold(spark: SparkSession, silver_path: str, output_dir: str) -> str:
+def run_gold(
+    spark: SparkSession,
+    silver_path: str,
+    output_dir: str,
+    ref_state_codes_csv: str = DEFAULT_REF_STATE_CODES_CSV,
+) -> str:
     """Aggregate Silver data by state into the Gold analytics layer.
 
     Aggregations per State_Code:
@@ -224,10 +230,16 @@ def run_gold(spark: SparkSession, silver_path: str, output_dir: str) -> str:
     - bmi_sum:      rounded total BMI across respondents
     - bmi_mean:     rounded average BMI across respondents
 
+    A ``State_Name`` column is added by joining with ``ref_state_codes_csv``
+    on ``State_Code``.  Rows whose code has no matching entry in the reference
+    file receive ``null`` for ``State_Name``.
+
     Args:
-        spark:       Active SparkSession.
-        silver_path: Path to Silver Parquet output.
-        output_dir:  Base output directory; a ``gold/`` subdirectory is created.
+        spark:              Active SparkSession.
+        silver_path:        Path to Silver Parquet output.
+        output_dir:         Base output directory; a ``gold/`` subdirectory is created.
+        ref_state_codes_csv: Path to the state-code reference CSV
+                             (columns: ``state_code``, ``state_name``).
 
     Returns:
         Path to the written Parquet directory.
@@ -245,6 +257,20 @@ def run_gold(spark: SparkSession, silver_path: str, output_dir: str) -> str:
         .orderBy("State_Code")
     )
 
+    ref_df = spark.read.csv(ref_state_codes_csv, header=True, inferSchema=True)
+    aggregated = (
+        aggregated
+        .join(ref_df, aggregated["State_Code"] == ref_df["state_code"], how="left")
+        .select(
+            aggregated["State_Code"],
+            F.col("state_name").alias("State_Name"),
+            F.col("record_count"),
+            F.col("bmi_sum"),
+            F.col("bmi_mean"),
+        )
+        .orderBy("State_Code")
+    )
+
     aggregated.write.mode("overwrite").parquet(output_path)
     print(f"[GOLD]   {aggregated.count():,} state aggregates written → {output_path}")
     return output_path
@@ -257,6 +283,7 @@ def run_gold(spark: SparkSession, silver_path: str, output_dir: str) -> str:
 def run_pipeline(
     input_csv: str = DEFAULT_INPUT_CSV,
     output_dir: str = DEFAULT_OUTPUT_DIR,
+    ref_state_codes_csv: str = DEFAULT_REF_STATE_CODES_CSV,
 ) -> dict[str, str]:
     """Run the full Bronze → Silver → Gold pipeline in a single SparkSession.
 
@@ -267,8 +294,9 @@ def run_pipeline(
     lifecycle is managed externally).
 
     Args:
-        input_csv:  Path to the source CSV file.
-        output_dir: Base directory for all pipeline layer outputs.
+        input_csv:           Path to the source CSV file.
+        output_dir:          Base directory for all pipeline layer outputs.
+        ref_state_codes_csv: Path to the state-code reference CSV.
 
     Returns:
         Dict mapping each layer name (``bronze``, ``silver``, ``gold``) to its
@@ -281,7 +309,7 @@ def run_pipeline(
     try:
         bronze_path = run_bronze(spark, input_csv, output_dir)
         silver_path = run_silver(spark, bronze_path, output_dir)
-        gold_path = run_gold(spark, silver_path, output_dir)
+        gold_path = run_gold(spark, silver_path, output_dir, ref_state_codes_csv)
     finally:
         spark.stop()
 
@@ -313,6 +341,13 @@ def _parse_args() -> argparse.Namespace:
         metavar="PATH",
         help="Base output directory for all pipeline layers.",
     )
+    parser.add_argument(
+        "--ref-state-codes",
+        default=DEFAULT_REF_STATE_CODES_CSV,
+        dest="ref_state_codes",
+        metavar="PATH",
+        help="Path to state-code reference CSV (columns: state_code, state_name).",
+    )
     return parser.parse_args()
 
 
@@ -323,7 +358,7 @@ def _parse_args() -> argparse.Namespace:
 def main() -> None:
     """Parse CLI arguments and run the full pipeline."""
     args = _parse_args()
-    output_paths = run_pipeline(args.input, args.output_dir)
+    output_paths = run_pipeline(args.input, args.output_dir, args.ref_state_codes)
     print("\nPipeline complete. Output paths:")
     for layer, path in output_paths.items():
         print(f"  {layer:6s}: {path}")

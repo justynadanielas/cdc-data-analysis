@@ -48,6 +48,7 @@ if _PROJECT_ROOT not in sys.path:
 from spark.health_data_pipeline import (  # noqa: E402
     DEFAULT_INPUT_CSV,
     DEFAULT_OUTPUT_DIR,
+    DEFAULT_REF_STATE_CODES_CSV,
     get_spark_session,
     run_bronze,
     run_silver,
@@ -95,7 +96,7 @@ with DAG(
         silver_path = ti.xcom_pull(task_ids="transform_to_silver", key="silver_path")
         output_dir = ti.xcom_pull(task_ids="ingest_raw_data", key="output_dir")
         spark = get_spark_session("health_pipeline_gold")
-        run_gold(spark, silver_path, output_dir)
+        run_gold(spark, silver_path, output_dir, DEFAULT_REF_STATE_CODES_CSV)
 
     ingest_task = PythonOperator(
         task_id="ingest_raw_data",
