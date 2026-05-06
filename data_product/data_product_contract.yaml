@@ -10,7 +10,7 @@ description: >
   Apache Spark 4.1.1 to support regional health trend analysis.
 
 product:
-  name: "US Geographic BMI & Health Volume Monitor"
+  name: "US Population BMI Monitor"
   owner: "Justyna Sałacińska"
   contact: "s36249@pjwstk.edu.pl"
   domain: "Healthcare / Public Health Analytics"
