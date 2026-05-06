@@ -1,5 +1,4 @@
 logs/
-data/
 temp_data/
 dags/temp_data/
 __pycache__
