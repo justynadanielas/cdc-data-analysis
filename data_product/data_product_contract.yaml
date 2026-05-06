@@ -1,0 +1,91 @@
+# Data Product Contract — US State BMI Insights
+# Based on Open Data Contract Standard (ODCS)
+# Repository: https://github.com/justynadanielas/cdc-data-analysis/tree/streaming
+
+dataset: us_state_bmi_aggregates
+version: "1.0"
+description: >
+  An aggregated, downstream data product providing the total record counts and 
+  mean Body Mass Index (BMI) calculations grouped by US State. Generated using 
+  Apache Spark 4.1.1 to support regional health trend analysis.
+
+product:
+  name: "US Geographic BMI & Health Volume Monitor"
+  owner: "Justyna Sałacińska"
+  contact: "s36249@pjwstk.edu.pl"
+  domain: "Healthcare / Public Health Analytics"
+  primary_users: "Data analysts, epidemiologists, health insurance risk underwriters"
+  purpose: >
+    Provides clean, pre-aggregated regional insights into human body mass index metrics 
+    across all US states and territories, eliminating the need to process raw, high-volume 
+    patient/survey level rows manually.
+
+schema:
+  - name: State_Code
+    type: double
+    nullable: true
+    description: "Numeric identifier representing the specific US state or territory"
+    example: 1.0
+
+  - name: State_Name
+    type: string
+    nullable: true
+    description: "Full textual name of the US State or Territory"
+    example: "Alabama"
+
+  - name: record_count
+    type: long
+    nullable: false
+    description: "Total number of individual survey responses or clinical rows aggregated for this state"
+    example: 5420
+
+  - name: bmi_mean
+    type: double
+    nullable: true
+    description: "Arithmetic mean of calculated BMI figures for the population group within this state"
+    example: 28.45
+
+quality_rules:
+  - rule: ExpectColumnValuesToBeUnique
+    target: State_Code
+    condition: "UNIQUE"
+  - rule: ExpectColumnValuesNotToBeNull
+    target: bmi_mean
+    condition: "NOT NULL"
+  - rule: ExpectColumnValuesToBeBetween
+    target: bmi_mean
+    condition: "15.0 AND 45.0"
+  - rule: ExpectColumnValuesToBeGreaterThan
+    target: record_count
+    condition: "0"
+
+SLA:
+  refresh_frequency: "Yearly (aligned with BRFSS data release schedule)"
+  max_delay: "5 days after upstream source drop"
+  retention: "Indefinite — snapshots of historical state health trends preserved"
+  update_trigger: "Airflow DAG / Scheduled Python Script"
+
+access:
+  method: "Parquet file download via Git repository or Enterprise Data Lakehouse"
+  location: "MS Teams Data Marketplace folder / Git repository data path"
+  formats:
+    - "Parquet"
+  instructions: "Load directly using Apache Spark, or Python pandas via pd.read_parquet()."
+  credentials: "Public / Class-restricted"
+
+sources:
+  - name: "Behavioral Risk Factor Surveillance System (BRFSS) / CDC"
+    type: "File/DB"
+    refresh: "Yearly"
+
+limitations:
+  - "The dataset provides aggregate averages only; individual patient variance or stratification (age, gender) is not visible."
+  - "State_Code is stored as a double data type due to upstream Spark translation quirks; standard joins should account for type matching."
+  - "Territories with low record counts (e.g., Guam, Puerto Rico) have wider confidence intervals."
+
+owners:
+  producer: "Justyna Sałacińska"
+  contact: "s36249@pjwstk.edu.pl"
+
+security:
+  classification: "Internal / Class Public (Anonymized Aggregations)"

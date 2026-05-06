@@ -227,8 +227,7 @@ def run_gold(
 
     Aggregations per State_Code:
     - record_count: number of survey respondents
-    - bmi_sum:      rounded total BMI across respondents
-    - bmi_mean:     rounded average BMI across respondents
+    - bmi_mean:     average BMI across respondents (double)
 
     A ``State_Name`` column is added by joining with ``ref_state_codes_csv``
     on ``State_Code``.  Rows whose code has no matching entry in the reference
@@ -251,8 +250,7 @@ def run_gold(
         df.groupBy("State_Code")
         .agg(
             F.count("BMI_Value").alias("record_count"),
-            F.round(F.sum("BMI_Value"), 2).alias("bmi_sum"),
-            F.round(F.mean("BMI_Value"), 4).alias("bmi_mean"),
+            F.mean("BMI_Value").cast("double").alias("bmi_mean"),
         )
         .orderBy("State_Code")
     )
@@ -265,7 +263,6 @@ def run_gold(
             aggregated["State_Code"],
             F.col("state_name").alias("State_Name"),
             F.col("record_count"),
-            F.col("bmi_sum"),
             F.col("bmi_mean"),
         )
         .orderBy("State_Code")
