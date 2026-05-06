@@ -15,3 +15,6 @@ kafka-python-ng==2.2.3
 
 # CSV chunked reading for the Kafka producer
 pandas==2.2.3
+
+# Parquet file handling
+pyarrow==23.0.1
