@@ -7,3 +7,4 @@ __pycache__
 *.db
 .github/prompts
 venv/
+data/ 

@@ -18,3 +18,7 @@ pandas==2.2.3
 
 # Parquet file handling
 pyarrow==23.0.1
+
+# Dagster orchestration (parity comparison – Day 2+)
+dagster==1.10.20
+dagster-webserver==1.10.20
