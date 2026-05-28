@@ -10,8 +10,10 @@ This keeps Dagster runs isolated from Airflow runs (which write to
 data/pipeline_output/<airflow_run_id>/) and allows run-by-run comparison.
 """
 
+import json
 import os
 import sys
+from datetime import datetime, timezone
 
 from dagster import OpExecutionContext, asset
 
@@ -120,4 +122,41 @@ def gold_aggregated_by_state(
         DEFAULT_REF_STATE_CODES_CSV,
     )
     context.log.info("Gold layer written to: %s", gold_path)
+
+    # ------------------------------------------------------------------
+    # Write run_manifest.json – mirrors data/airflow_baseline.json layout
+    # so the comparison script has a single stable schema to read from
+    # both orchestrators.
+    # ------------------------------------------------------------------
+    bronze_path = os.path.join(run_output_dir, "bronze", "raw_data.parquet")
+    silver_path = os.path.join(run_output_dir, "silver", "filtered_data.parquet")
+    now = datetime.now(timezone.utc).isoformat()
+    manifest = {
+        "orchestrator": "dagster",
+        "run_id": context.run_id,
+        "captured_at": now,
+        "input_file": DEFAULT_INPUT_CSV,
+        "output_dir": run_output_dir,
+        "output_paths": {
+            "bronze": bronze_path,
+            "silver": silver_path,
+            "gold": gold_path,
+        },
+    }
+    manifest_path = os.path.join(run_output_dir, "run_manifest.json")
+    with open(manifest_path, "w") as fh:
+        json.dump(manifest, fh, indent=2)
+    context.log.info("Run manifest written to: %s", manifest_path)
+
+    # Overwrite the stable pointer so callers can find the latest run
+    # without scanning directories.
+    latest_path = os.path.join(DAGSTER_BASE_OUTPUT_DIR, "latest_run.json")
+    with open(latest_path, "w") as fh:
+        json.dump(
+            {"run_id": context.run_id, "manifest_path": manifest_path, "captured_at": now},
+            fh,
+            indent=2,
+        )
+    context.log.info("Latest-run pointer updated: %s", latest_path)
+
     return gold_path

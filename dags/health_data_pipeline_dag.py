@@ -30,8 +30,10 @@ To trigger via Airflow CLI:
 
 from __future__ import annotations
 
+import json
 import os
 import sys
+from datetime import datetime, timezone
 
 import pendulum
 
@@ -96,7 +98,43 @@ with DAG(
         silver_path = ti.xcom_pull(task_ids="transform_to_silver", key="silver_path")
         output_dir = ti.xcom_pull(task_ids="ingest_raw_data", key="output_dir")
         spark = get_spark_session("health_pipeline_gold")
-        run_gold(spark, silver_path, output_dir, DEFAULT_REF_STATE_CODES_CSV)
+        gold_path = run_gold(spark, silver_path, output_dir, DEFAULT_REF_STATE_CODES_CSV)
+        ti.xcom_push(key="gold_path", value=gold_path)
+
+    def task_write_run_manifest(**kwargs) -> None:
+        """Write run_manifest.json into the run directory and update latest_run.json pointer."""
+        ti = kwargs["ti"]
+        output_dir = ti.xcom_pull(task_ids="ingest_raw_data", key="output_dir")
+        bronze_path = ti.xcom_pull(task_ids="ingest_raw_data", key="bronze_path")
+        silver_path = ti.xcom_pull(task_ids="transform_to_silver", key="silver_path")
+        gold_path = ti.xcom_pull(task_ids="aggregate_to_gold", key="gold_path")
+        run_id = kwargs["dag_run"].run_id
+        now = datetime.now(timezone.utc).isoformat()
+        manifest = {
+            "orchestrator": "airflow",
+            "run_id": run_id,
+            "captured_at": now,
+            "input_file": DEFAULT_INPUT_CSV,
+            "output_dir": output_dir,
+            "output_paths": {
+                "bronze": bronze_path,
+                "silver": silver_path,
+                "gold": gold_path,
+            },
+        }
+        manifest_path = os.path.join(output_dir, "run_manifest.json")
+        with open(manifest_path, "w") as fh:
+            json.dump(manifest, fh, indent=2)
+
+        # Stable pointer at the base output dir so the comparison script
+        # can always find the latest Airflow run without scanning directories.
+        latest_path = os.path.join(DEFAULT_OUTPUT_DIR, "latest_airflow_run.json")
+        with open(latest_path, "w") as fh:
+            json.dump(
+                {"run_id": run_id, "manifest_path": manifest_path, "captured_at": now},
+                fh,
+                indent=2,
+            )
 
     ingest_task = PythonOperator(
         task_id="ingest_raw_data",
@@ -113,4 +151,9 @@ with DAG(
         python_callable=task_aggregate_to_gold,
     )
 
-    ingest_task >> transform_task >> aggregate_task
+    manifest_task = PythonOperator(
+        task_id="write_run_manifest",
+        python_callable=task_write_run_manifest,
+    )
+
+    ingest_task >> transform_task >> aggregate_task >> manifest_task
