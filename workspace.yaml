@@ -1,0 +1,10 @@
+# Dagster workspace configuration
+# Tells `dagster dev` and `dagster job execute` where to find the Definitions object.
+#
+# Run from the project root:
+#   dagster dev                                          # launch Dagster UI
+#   dagster job execute -j health_data_pipeline_job      # headless single run
+load_from:
+  - python_module:
+      module_name: dagster_pipeline.definitions
+      attribute: defs
